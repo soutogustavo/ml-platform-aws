@@ -12,3 +12,10 @@ module "mlflow" {
   artifact_bucket_arn = module.artifact_store.bucket_arn
   artifact_store_uri  = "s3://${module.artifact_store.bucket_name}/mlflow"
 }
+
+module "github_oidc" {
+  source = "./modules/github_oidc"
+
+  name_prefix = local.name_prefix
+  github_repo = var.github_repo
+}
