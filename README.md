@@ -4,8 +4,6 @@ Shared AWS infrastructure for my ML portfolio projects: **one managed MLflow tra
 
 Project repos like `rossmann-forecasting-benchmark` own their data, pipelines and compute. This repo owns only what is **shared** among them and must outlive any single project: experiment history and the identity CI uses to reach AWS.
 
----
-
 ## Contents
 
 1. [Services provided](#services-provided)
@@ -18,7 +16,6 @@ Project repos like `rossmann-forecasting-benchmark` own their data, pipelines an
 8. [Cost](#cost)
 9. [Teardown](#teardown)
 
----
 
 ## Services provided
 
@@ -45,7 +42,8 @@ Other repos depend **only** on these outputs. Renaming one is a breaking change.
 | `github_plan_role_arn`, `github_apply_role_arn` | Copied into this repo's GitHub variables |
 | `region` | `eu-central-1` |
 
----
+
+
 
 ## Architecture
 
@@ -63,7 +61,6 @@ Two paths, and both need permissions: **metadata** goes to the MLflow App, **art
 - **Terraform state** lives in HCP Terraform (org `gsouto-labs`, workspace `ml-platform-aws`), execution mode **Local**: HCP only stores and locks the state, Terraform runs on the GitHub runner or on my laptop.
 - **AWS credentials** come from GitHub OIDC: each job exchanges a signed GitHub token for 1-hour credentials. The role trust policies only accept tokens from this repo, and only from PRs (plan) or `main` (apply).
 
----
 
 ## Repository layout
 
@@ -82,7 +79,66 @@ ml-platform-aws/
 └── pyproject.toml                   # uv: mlflow, sagemaker-mlflow, boto3
 ```
 
----
+
+## Local machine setup
+
+Everything needed to work on this repo from a fresh laptop. Nothing here is stored in the repo: credentials stay in `~/.aws`, helpers stay in your shell config.
+
+### 1. Tools
+
+AWS CLI v2, Terraform >= 1.6, `uv`, `git`.
+
+### 2. AWS profiles (`~/.aws/config` and `~/.aws/credentials`)
+
+Day-to-day access never uses root. An IAM user whose only permission is to assume an admin role, protected by MFA:
+
+```ini
+# ~/.aws/credentials  (the only long-lived key; it can do nothing except assume the role)
+[gsouto]
+aws_access_key_id     = <access key>
+aws_secret_access_key = <secret>
+
+# ~/.aws/config
+[profile portfolio-admin]
+role_arn       = arn:aws:iam::<account_id>:role/PortfolioAdmin
+source_profile = gsouto
+mfa_serial     = arn:aws:iam::<account_id>:mfa/<device>
+region         = eu-central-1
+```
+
+### 3. Shell helper: export temporary credentials (`~/.zshrc`)
+
+```bash
+alias awsadmin='eval "$(aws configure export-credentials --profile portfolio-admin --format env)" && export AWS_REGION=eu-central-1 AWS_DEFAULT_REGION=eu-central-1'
+```
+
+Run `awsadmin` once per session: the AWS CLI asks for the MFA code, assumes `PortfolioAdmin` and exports short-lived `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` into the shell. Terraform and Python then pick them up from the environment.
+
+**Why not just `AWS_PROFILE=portfolio-admin`?** Terraform cannot prompt for an MFA code, so a profile with `mfa_serial` fails inside Terraform (see [problem 8](#8-terraform-cannot-prompt-for-the-mfa-code)). The CLI does the MFA step, Terraform only sees ready-made temporary credentials.
+
+Check who you are before any `plan` or `apply`:
+
+```bash
+awsadmin
+aws sts get-caller-identity   # Arn should end in assumed-role/PortfolioAdmin/...
+```
+
+Credentials expire (about 1 hour): if a command suddenly returns `ExpiredToken`, run `awsadmin` again.
+
+### 4. HCP Terraform
+
+```bash
+terraform login   # stores a user token in ~/.terraform.d/credentials.tfrc.json
+```
+
+### 5. MLflow environment
+
+```bash
+export MLFLOW_TRACKING_URI=$(terraform -chdir=infra output -raw mlflow_tracking_uri)
+```
+
+Read it from the Terraform output instead of hard-coding the ARN: if the MLflow App is ever recreated, the ARN changes and a hard-coded value silently points to nothing. `MLFLOW_TRACKING_URI` is the name the MLflow client reads automatically; any other name (e.g. `MLFLOW_APP_ARN`) only works if your code reads it explicitly.
+
 
 ## Reproduce from scratch
 
@@ -169,7 +225,7 @@ Push the code. The `apply` job should end with **"No changes"**. That single run
 
 Open a PR with a harmless change (e.g. a tag). Expect a PR comment with the plan, then merge and watch `apply` run on `main`.
 
----
+
 
 ## Day-to-day workflow
 
@@ -180,7 +236,7 @@ Open a PR with a harmless change (e.g. a tag). Expect a PR comment with the plan
 | `terraform apply` locally | **Only as break-glass**, e.g. when CI cannot assume its own role. Anything applied locally that is not on `main` is reverted by the next CI apply |
 | Draft PRs | Work normally: `plan` runs on drafts too |
 
----
+
 
 ## Consume the platform from a project
 
@@ -219,7 +275,7 @@ mlflow.set_experiment("rossmann/xgb-global")
 | Run tag `git_sha` | commit of the training code | reproducibility |
 | Registered model | `<project>-<model>` | `rossmann-xgb-global` |
 
----
+
 
 ## Problems faced and how they were solved
 
@@ -262,7 +318,13 @@ Real issues hit while building this, kept here because each one is a lesson.
 - **Fix**: no `paths` filter on `pull_request` (plan runs on every PR, "No changes" in seconds); `push` to `main` keeps the filter.
 - **Lesson**: branch rules and workflow triggers must agree.
 
----
+#### 8. Terraform cannot prompt for the MFA code
+- **Symptom**: with `AWS_PROFILE=portfolio-admin`, Terraform fails to assume the role, while `aws` CLI commands with the same profile work.
+- **Cause**: the profile requires MFA (`mfa_serial`). The AWS CLI can ask for the code interactively; the Terraform AWS provider cannot.
+- **Fix**: let the CLI do the MFA step and export temporary credentials into the shell (`awsadmin` alias, see [Local machine setup](#local-machine-setup)).
+- **Lesson**: in CI the same problem does not exist, because OIDC replaces both the long-lived key and the MFA step.
+
+
 
 ## Cost
 
@@ -275,7 +337,7 @@ Real issues hit while building this, kept here because each one is a lesson.
 
 Set an AWS Budget alert regardless. "Should be free" is a hypothesis; the bill is the measurement.
 
----
+
 
 ## Teardown
 
